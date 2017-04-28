@@ -12,7 +12,6 @@ set(MODULE_PYTHON_SCRIPTS
   SlicerVmtkCommonLib/__init__.py
   SlicerVmtkCommonLib/Helper.py
   SlicerVmtkCommonLib/LevelSetSegmentationLogic.py
-  SlicerVmtkCommonLib/VesselnessFilteringLogic.py
   SlicerVmtkCommonLib/CenterlineComputationLogic.py
   # here go other vmtk logic classes
   )

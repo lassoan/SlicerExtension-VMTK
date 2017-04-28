@@ -51,10 +51,6 @@ class CenterlineComputationWidget(ScriptedLoadableModuleWidget):
   def setup( self ):
     ScriptedLoadableModuleWidget.setup(self)
 
-    # check if the SlicerVmtk module is installed properly
-    # self.__vmtkInstalled = SlicerVmtkCommonLib.Helper.CheckIfVmtkIsInstalled()
-    # Helper.Debug("VMTK found: " + self.__vmtkInstalled)
-
     #
     # Inputs
     #

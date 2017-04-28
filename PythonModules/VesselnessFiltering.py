@@ -43,9 +43,7 @@ class VesselnessFilteringWidget(ScriptedLoadableModuleWidget):
 
   def __init__( self, parent=None ):
     ScriptedLoadableModuleWidget.__init__(self, parent)
-
-    # the pointer to the logic
-    self.__logic = SlicerVmtkCommonLib.VesselnessFilteringLogic()
+    self.logic = VesselnessFilteringLogic()
 
     if not parent:
       # after setup, be ready for events
@@ -56,6 +54,12 @@ class VesselnessFilteringWidget(ScriptedLoadableModuleWidget):
 
   def setup(self):
     ScriptedLoadableModuleWidget.setup(self)
+
+    try:
+      import vtkvmtkSegmentationPython as vtkvmtkSegmentation
+    except ImportError:
+      self.layout.addWidget(qt.QLabel("Failed to load VMTK libraries"))
+      return
 
     #
     # the I/O panel
@@ -75,7 +79,6 @@ class VesselnessFilteringWidget(ScriptedLoadableModuleWidget):
     self.__inputVolumeNodeSelector.addEnabled = False
     self.__inputVolumeNodeSelector.removeEnabled = False
     ioFormLayout.addRow( "Input Volume:", self.__inputVolumeNodeSelector )
-    self.__inputVolumeNodeSelector.connect( 'currentNodeChanged(vtkMRMLNode*)', self.onInputVolumeChanged )
     self.parent.connect( 'mrmlSceneChanged(vtkMRMLScene*)',
                         self.__inputVolumeNodeSelector, 'setMRMLScene(vtkMRMLScene*)' )
 
@@ -127,10 +130,19 @@ class VesselnessFilteringWidget(ScriptedLoadableModuleWidget):
     self.__previewVolumeNodeSelector.addEnabled = True
     self.__previewVolumeNodeSelector.selectNodeUponCreation = True
     self.__previewVolumeNodeSelector.removeEnabled = True
-    advancedFormLayout.addRow( "Preview Volume:", self.__previewVolumeNodeSelector )
+    advancedFormLayout.addRow( "Preview volume:", self.__previewVolumeNodeSelector )
     self.parent.connect( 'mrmlSceneChanged(vtkMRMLScene*)',
                         self.__previewVolumeNodeSelector, 'setMRMLScene(vtkMRMLScene*)' )
 
+    self.__previewVolumeDiameterVoxelSlider = ctk.ctkSliderWidget()
+    self.__previewVolumeDiameterVoxelSlider.decimals = 0
+    self.__previewVolumeDiameterVoxelSlider.minimum = 10
+    self.__previewVolumeDiameterVoxelSlider.maximum = 200
+    self.__previewVolumeDiameterVoxelSlider.singleStep = 5
+    self.__previewVolumeDiameterVoxelSlider.suffix = " voxels"
+    self.__previewVolumeDiameterVoxelSlider.toolTip = "Diameter of the preview area in voxels."
+    advancedFormLayout.addRow( "Preview volume size:", self.__previewVolumeDiameterVoxelSlider )
+                        
     # lock button
     self.__detectPushButton = qt.QPushButton()
     self.__detectPushButton.text = "Compute vessel diameters and contrast from seed point"
@@ -223,10 +235,6 @@ class VesselnessFilteringWidget(ScriptedLoadableModuleWidget):
     logging.debug( "onMRMLSceneChanged" )
     self.restoreDefaults()
 
-  def onInputVolumeChanged( self ):
-    logging.debug( "onInputVolumeChanged" )
-    # TODO: update threshold slider range - maybe not needed?
-
   def onStartButtonClicked( self ):
     if self.__detectPushButton.checked:
       self.calculateParameters()
@@ -249,53 +257,34 @@ class VesselnessFilteringWidget(ScriptedLoadableModuleWidget):
       # activate startButton
       self.__startButton.enabled = True
 
-
   def calculateParameters( self ):
-    '''
-    '''
-
     logging.debug( "calculateParameters" )
 
-    # first we need the nodes
     currentVolumeNode = self.__inputVolumeNodeSelector.currentNode()
-    currentSeedsNode = self.__seedFiducialsNodeSelector.currentNode()
-
     if not currentVolumeNode:
-        # we need a input volume node
-        logging.debug( "calculateParameters: Have no valid volume node" )
-        return False
+      raise ValueError("Input volume node is invalid")
 
-    if not currentSeedsNode:
-        # we need a seeds node
-        logging.debug( "calculateParameters: Have no valid fiducial node" )
-        return False
-
-    image = currentVolumeNode.GetImageData()
-
-    currentCoordinatesRAS = [0, 0, 0]
-
-    # grab the current coordinates
-    n = currentSeedsNode.GetNumberOfFiducials()
-    currentSeedsNode.GetNthFiducialPosition(n-1,currentCoordinatesRAS)
-
-    seed = SlicerVmtkCommonLib.Helper.ConvertRAStoIJK( currentVolumeNode, currentCoordinatesRAS )
+    currentSeedsNode = self.__seedFiducialsNodeSelector.currentNode()
+    if not currentVolumeNode:
+      raise ValueError("Input seed node is invalid")
+      
+    vesselPositionIJK = self.logic.getIJKFromRAS(currentVolumeNode, self.logic.getSeedPositionRAS(currentSeedsNode))
 
     # we detect the diameter in IJK space (image has spacing 1,1,1) with IJK coordinates
-    detectedDiameter = self.__logic.getDiameter( image, int( seed[0] ), int( seed[1] ), int( seed[2] ) )
+    detectedDiameter = self.logic.getDiameter( currentVolumeNode.GetImageData(), vesselPositionIJK)
     logging.debug( "Diameter detected: " + str( detectedDiameter ) )
 
-    contrastMeasure = self.__logic.calculateContrastMeasure( image, int( seed[0] ), int( seed[1] ), int( seed[2] ), detectedDiameter )
+    contrastMeasure = self.logic.calculateContrastMeasure( currentVolumeNode.GetImageData(), vesselPositionIJK, detectedDiameter )
     logging.debug( "Contrast measure: " + str( contrastMeasure ) )
 
     self.__maximumDiameterSpinBox.value = detectedDiameter
     self.__contrastSlider.value = contrastMeasure
 
-    return True
-
   def restoreDefaults( self ):
     logging.debug("restoreDefaults")
 
     self.__detectPushButton.checked = True
+    self.__previewVolumeDiameterVoxelSlider.value = 20
     self.__minimumDiameterSpinBox.value = 1
     self.__maximumDiameterSpinBox.value = 7
     self.__suppressPlatesSlider.value = 10
@@ -304,120 +293,48 @@ class VesselnessFilteringWidget(ScriptedLoadableModuleWidget):
 
     self.__startButton.enabled = False
 
-    # if a volume is selected, the threshold slider values have to match it
-    self.onInputVolumeChanged()
-
 
   def start( self, preview=False ):
-    '''
-    '''
-    logging.debug( "Starting Vesselness Filtering.." )
-
     # first we need the nodes
     currentVolumeNode = self.__inputVolumeNodeSelector.currentNode()
     currentSeedsNode = self.__seedFiducialsNodeSelector.currentNode()
 
+    # Determine output volume node
     if preview:
-        # if previewMode, get the node selector of the preview volume
-        currentOutputVolumeNodeSelector = self.__previewVolumeNodeSelector
+      # if previewMode, get the node selector of the preview volume
+      currentOutputVolumeNodeSelector = self.__previewVolumeNodeSelector
+      # preview region
+      previewRegionSizeVoxel = self.__previewVolumeDiameterVoxelSlider.value
+      previewRegionCenterRAS = self.logic.getSeedPositionRAS(currentSeedsNode)
     else:
-        currentOutputVolumeNodeSelector = self.__outputVolumeNodeSelector
-
+      currentOutputVolumeNodeSelector = self.__outputVolumeNodeSelector
+      # preview region
+      previewRegionSizeVoxel = -1
+      previewRegionCenterRAS = None
     currentOutputVolumeNode = currentOutputVolumeNodeSelector.currentNode()
-
-    if not currentVolumeNode:
-        # we need a input volume node
-        return False
-
-    fitToAllSliceViews = False
+   
+   # Create output voluem if does not exist yet
     if not currentOutputVolumeNode or currentOutputVolumeNode.GetID() == currentVolumeNode.GetID():
-        newVolumeNode = slicer.mrmlScene.CreateNodeByClass( "vtkMRMLScalarVolumeNode" )
-        newVolumeNode.UnRegister(None)        
-        newVolumeNode.SetName( slicer.mrmlScene.GetUniqueNameByString( currentOutputVolumeNodeSelector.baseName ) )
-        currentOutputVolumeNode = slicer.mrmlScene.AddNode( newVolumeNode )
-        currentOutputVolumeNode.CreateDefaultDisplayNodes()
-        currentOutputVolumeNodeSelector.setCurrentNode( currentOutputVolumeNode )
-        fitToAllSliceViews = True
-
-    if preview and not currentSeedsNode:
-        # we need a seedsNode for preview
-        logging.error( "Seed point is required to use the preview mode")
-        return False
-
-
-    # we get the fiducial coordinates
-    if currentSeedsNode:
-
-        currentCoordinatesRAS = [0, 0, 0]
-
-        # grab the current coordinates
-        n = currentSeedsNode.GetNumberOfFiducials()
-        currentSeedsNode.GetNthFiducialPosition(n-1,currentCoordinatesRAS)
-
-    inputImage = currentVolumeNode.GetImageData()
-
-    #
-    # vesselness parameters
-    #
-
-    # we need to convert diameter to mm, we use the minimum spacing to multiply the voxel value
-    minimumDiameter = self.__minimumDiameterSpinBox.value * min( currentVolumeNode.GetSpacing() )
-    maximumDiameter = self.__maximumDiameterSpinBox.value * min( currentVolumeNode.GetSpacing() )
-
-    logging.debug( minimumDiameter )
-    logging.debug( maximumDiameter )
-
-    alpha = 0.000 + 3.0 * pow((self.__suppressPlatesSlider.value)/100.0,2)
-    beta  = 0.001 + 1.0 * pow((100.0-self.__suppressBlobsSlider.value)/100.0,2)
-
-    logging.info("alpha = {0}".format(alpha))
-    logging.info("beta = {0}".format(beta))
-    
-    contrastMeasure = self.__contrastSlider.value
-
-    #
-    # end of vesselness parameters
-    #
-
-    # this image will later hold the inputImage
-    image = vtk.vtkImageData()
-
-    # this image will later hold the outputImage
-    outImage = vtk.vtkImageData()
-
-    # if we are in previewMode, we have to cut the ROI first for speed
-    if preview:
-
-        # we extract the ROI of currentVolumeNode and save it to currentOutputVolumeNode
-        # we work in RAS space
-        SlicerVmtkCommonLib.Helper.extractROI( currentVolumeNode.GetID(), currentOutputVolumeNode.GetID(), currentCoordinatesRAS, self.__maximumDiameterSpinBox.value )
-
-        # get the new cutted imageData
-        image.DeepCopy( currentOutputVolumeNode.GetImageData() )
-
+      newVolumeNode = slicer.mrmlScene.CreateNodeByClass( "vtkMRMLScalarVolumeNode" )
+      newVolumeNode.UnRegister(None)        
+      newVolumeNode.SetName( slicer.mrmlScene.GetUniqueNameByString( currentOutputVolumeNodeSelector.baseName ) )
+      currentOutputVolumeNode = slicer.mrmlScene.AddNode( newVolumeNode )
+      currentOutputVolumeNode.CreateDefaultDisplayNodes()
+      currentOutputVolumeNodeSelector.setCurrentNode( currentOutputVolumeNode )
+      fitToAllSliceViews = True
     else:
+      fitToAllSliceViews = False
+    
+    # we need to convert diameter to mm, we use the minimum spacing to multiply the voxel value
+    minimumDiameterMm = self.__minimumDiameterSpinBox.value * min( currentVolumeNode.GetSpacing() )
+    maximumDiameterMm = self.__maximumDiameterSpinBox.value * min( currentVolumeNode.GetSpacing() )
 
-        # there was no ROI extraction, so just clone the inputImage
-        image.DeepCopy( inputImage )
-
-    # attach the spacing and origin to get accurate vesselness computation
-    image.SetSpacing( currentVolumeNode.GetSpacing() )
-    image.SetOrigin( currentVolumeNode.GetOrigin() )
-
-    # we now compute the vesselness in RAS space, image has spacing and origin attached, the diameters are converted to mm
-    # we use RAS space to support anisotropic datasets
-    outImage.DeepCopy( self.__logic.performFrangiVesselness( image, minimumDiameter, maximumDiameter, 5, alpha, beta, contrastMeasure ) )
-
-    # let's remove spacing and origin attached to outImage
-    outImage.SetSpacing( 1, 1, 1 )
-    outImage.SetOrigin( 0, 0, 0 )
-
-    # we only want to copy the orientation from input to output when we are not in preview mode
-    if not preview:
-        currentOutputVolumeNode.CopyOrientation( currentVolumeNode )
-
-    # we set the outImage which has spacing 1,1,1. The ijkToRas matrix of the node will take care of that
-    currentOutputVolumeNode.SetAndObserveImageData( outImage )
+    alpha = self.logic.alphaFromSuppressPlatesPercentage(self.__suppressPlatesSlider.value)
+    beta = self.logic.alphaFromSuppressPlatesPercentage(self.__suppressBlobsSlider.value)
+    contrastMeasure = self.__contrastSlider.value
+    
+    self.logic.computeVesselnessVolume(currentVolumeNode, currentOutputVolumeNode, previewRegionCenterRAS, previewRegionSizeVoxel,
+      minimumDiameterMm, maximumDiameterMm, alpha, beta, contrastMeasure)
 
     # for preview: show the inputVolume as background and the outputVolume as foreground in the slice viewers
     #    note: that's the only way we can have the preview as an overlay of the originalvolume
@@ -461,14 +378,269 @@ class VesselnessFilteringWidget(ScriptedLoadableModuleWidget):
           for n in xrange( numberOfSliceNodes ):
               sliceNode = slicer.mrmlScene.GetNthNodeByClass( n, "vtkMRMLSliceNode" )
               if sliceNode:
-                  sliceNode.JumpSliceByOffsetting( currentCoordinatesRAS[0], currentCoordinatesRAS[1], currentCoordinatesRAS[2] )
+                  sliceNode.JumpSliceByOffsetting( previewRegionCenterRAS[0], previewRegionCenterRAS[1], previewRegionCenterRAS[2] )
+                  
+    logging.debug( "End of Vesselness Filtering" )
 
+class VesselnessFilteringLogic(ScriptedLoadableModuleLogic):
+  """This class should implement all the actual
+  computation done by your module.  The interface
+  should be such that other python code can import
+  this class and make use of the functionality without
+  requiring an instance of the Widget.
+  Uses ScriptedLoadableModuleLogic base class, available at:
+  https://github.com/Slicer/Slicer/blob/master/Base/Python/slicer/ScriptedLoadableModule.py
+  """
+
+  def __init__(self):
+    ScriptedLoadableModuleLogic.__init__(self)
+    # the pointer to the logic
+
+  def getSeedPositionRAS(self, seedNode):
+    if not seedNode:
+        raise ValueError("Input seed node is invalid")
+    n = seedNode.GetNumberOfFiducials()
+    seedPositionRAS = [0, 0, 0]
+    seedNode.GetNthFiducialPosition(n-1,seedPositionRAS)
+    return seedPositionRAS  
+
+  def getIJKFromRAS(self, volumeNode, ras):
+    ijk = SlicerVmtkCommonLib.Helper.ConvertRAStoIJK(volumeNode, ras)
+    return [int(ijk[0]), int(ijk[1]), int(ijk[2])]
+    
+  def alphaFromSuppressPlatesPercentage(self, suppressPlatesPercentage):
+    return 0.000 + 3.0 * pow(suppressPlatesPercentage/100.0,2)
+
+  def betaFromSuppressBlobsPercentage(self, suppressBlobsPercentage):
+    return 0.001 + 1.0 * pow((100.0-self.suppressBlobsPercentage.value)/100.0,2)
+
+  def computeVesselnessVolume(self, currentVolumeNode, currentOutputVolumeNode,
+    previewRegionCenterRAS=None, previewRegionSizeVoxel=-1, minimumDiameterMm=0, maximumDiameterMm=25,
+    alpha=0.3, beta=0.3, contrastMeasure=150):
+
+    logging.debug("Starting Vesselness Filtering: diameter min={0}, max={1}, alpha={2}, beta={3}, contrastMeasure={4}".format(
+      minimumDiameterMm, maximumDiameterMm, alpha, beta, contrastMeasure))
+
+    if not currentVolumeNode:
+      raise ValueError("Output volume node is invalid")
+
+    # this image will later hold the inputImage
+    inImage = vtk.vtkImageData()
+
+    # if we are in previewMode, we have to cut the ROI first for speed
+    if previewRegionSizeVoxel>0:
+        # we extract the ROI of currentVolumeNode and save it to currentOutputVolumeNode
+        # we work in RAS space
+        imageclipper = vtk.vtkImageConstantPad()
+        imageclipper.SetInputData(currentVolumeNode.GetImageData())
+        previewRegionCenterIJK = self.getIJKFromRAS(currentVolumeNode, previewRegionCenterRAS)
+        previewRegionRadiusVoxel = int(round(previewRegionSizeVoxel/2+0.5))
+        imageclipper.SetOutputWholeExtent(
+          previewRegionCenterIJK[0]-previewRegionRadiusVoxel, previewRegionCenterIJK[0]+previewRegionRadiusVoxel,
+          previewRegionCenterIJK[1]-previewRegionRadiusVoxel, previewRegionCenterIJK[1]+previewRegionRadiusVoxel,
+          previewRegionCenterIJK[2]-previewRegionRadiusVoxel, previewRegionCenterIJK[2]+previewRegionRadiusVoxel)
+        imageclipper.Update()
+        currentOutputVolumeNode.SetAndObserveImageData(imageclipper.GetOutput())
+        currentOutputVolumeNode.CopyOrientation(currentVolumeNode)
+        currentOutputVolumeNode.ShiftImageDataExtentToZeroStart()
+        inImage.DeepCopy(currentOutputVolumeNode.GetImageData())
+    else:
+        # there was no ROI extraction, so just clone the inputImage
+        inImage.DeepCopy(currentVolumeNode.GetImageData())
+        currentOutputVolumeNode.CopyOrientation( currentVolumeNode )
+
+    # temporarily set spacing to allow vesselness computation performed in physical space
+    inImage.SetSpacing( currentVolumeNode.GetSpacing() )
+
+    # we now compute the vesselness in RAS space, inImage has spacing and origin attached, the diameters are converted to mm
+    # we use RAS space to support anisotropic datasets
+    
+    import vtkvmtkSegmentationPython as vtkvmtkSegmentation
+
+    cast = vtk.vtkImageCast()
+    cast.SetInputData( inImage )
+    cast.SetOutputScalarTypeToFloat()
+    cast.Update()
+    inImage = cast.GetOutput()
+
+    discretizationSteps = 5
+    
+    v = vtkvmtkSegmentation.vtkvmtkVesselnessMeasureImageFilter()
+    v.SetInputData( inImage )
+    v.SetSigmaMin( minimumDiameterMm )
+    v.SetSigmaMax( maximumDiameterMm )
+    v.SetNumberOfSigmaSteps( discretizationSteps )
+    v.SetAlpha( alpha )
+    v.SetBeta( beta )
+    v.SetGamma( contrastMeasure )
+    v.Update()
+
+    outImage = vtk.vtkImageData()
+    outImage.DeepCopy( v.GetOutput() )
+    outImage.GetPointData().GetScalars().Modified()    
+
+    # restore Slicer-compliant image spacing
+    outImage.SetSpacing( 1, 1, 1 )
+
+    # we set the outImage which has spacing 1,1,1. The ijkToRas matrix of the node will take care of that
+    currentOutputVolumeNode.SetAndObserveImageData( outImage )
+
+    # save which volume node vesselness filterint result was saved to
     currentVolumeNode.SetAndObserveNodeReferenceID("Vesselness", currentOutputVolumeNode.GetID())
                   
-    logging.debug( "End of Vesselness Filtering.." )
+    logging.debug( "End of Vesselness Filtering" )
 
-    return True
 
+  def getDiameter( self, image, ijk ):
+      edgeImage = self.performLaplaceOfGaussian( image )
+
+      foundDiameter = False
+
+      edgeImageSeedValue = edgeImage.GetScalarComponentAsFloat(ijk[0], ijk[1], ijk[2], 0)
+      seedValueSign = cmp( edgeImageSeedValue, 0 )  # returns 1 if >0 or -1 if <0
+
+      # the list of hits
+      # [left, right, top, bottom, front, back]
+      hits = [False, False, False, False, False, False]
+
+      distanceFromSeed = 1
+      while not foundDiameter:
+
+          if ( distanceFromSeed >= edgeImage.GetDimensions()[0]
+              or distanceFromSeed >= edgeImage.GetDimensions()[1]
+              or distanceFromSeed >= edgeImage.GetDimensions()[2] ):
+              # we are out of bounds
+              break
+
+          # get the values for the lookahead directions in the edgeImage
+          edgeValues = [edgeImage.GetScalarComponentAsFloat( ijk[0] - distanceFromSeed, ijk[1], ijk[2], 0 ),  # left
+                        edgeImage.GetScalarComponentAsFloat( ijk[0] + distanceFromSeed, ijk[1], ijk[2], 0 ),  # right
+                        edgeImage.GetScalarComponentAsFloat( ijk[0], ijk[1] + distanceFromSeed, ijk[2], 0 ),  # top
+                        edgeImage.GetScalarComponentAsFloat( ijk[0], ijk[1] - distanceFromSeed, ijk[2], 0 ),  # bottom
+                        edgeImage.GetScalarComponentAsFloat( ijk[0], ijk[1], ijk[2] + distanceFromSeed, 0 ),  # front
+                        edgeImage.GetScalarComponentAsFloat( ijk[0], ijk[1], ijk[2] - distanceFromSeed, 0 )]  # back
+
+          # first loop, check if we have hits
+          for v in range( len( edgeValues ) ):
+
+              if not hits[v] and cmp( edgeValues[v], 0 ) != seedValueSign:
+                  # hit
+                  hits[v] = True
+
+          # now check if we have two hits in opposite directions
+          if hits[0] and hits[1]:
+              # we have the diameter!
+              foundDiameter = True
+              break
+
+          if hits[2] and hits[3]:
+              foundDiameter = True
+              break
+
+          if hits[4] and hits[5]:
+              foundDiameter = True
+              break
+
+          # increase distance from seed for next iteration
+          distanceFromSeed += 1
+
+      # we now just return the distanceFromSeed
+      # if the diameter was not detected properly, this can equal one of the image dimensions
+      return distanceFromSeed
+
+
+  def performLaplaceOfGaussian( self, image ):
+      '''
+      '''
+
+      gaussian = vtk.vtkImageGaussianSmooth()
+      gaussian.SetInputData( image )
+      gaussian.Update()
+
+      laplacian = vtk.vtkImageLaplacian()
+      laplacian.SetInputData( gaussian.GetOutput() )
+      laplacian.Update()
+
+      outImageData = vtk.vtkImageData()
+      outImageData.DeepCopy( laplacian.GetOutput() )
+
+      return outImageData
+
+
+  def calculateContrastMeasure( self, image, ijk, diameter ):
+      '''
+      '''
+      seedValue = image.GetScalarComponentAsFloat( ijk[0], ijk[1], ijk[2], 0 )
+
+      outsideValues = [seedValue - image.GetScalarComponentAsFloat( ijk[0] + ( 2 * diameter ), ijk[1], ijk[2], 0 ),  # right
+                       seedValue - image.GetScalarComponentAsFloat( ijk[0] - ( 2 * diameter ), ijk[1], ijk[2], 0 ),  # left
+                       seedValue - image.GetScalarComponentAsFloat( ijk[0], ijk[1] + ( 2 * diameter ), ijk[2], 0 ),  # top
+                       seedValue - image.GetScalarComponentAsFloat( ijk[0], ijk[1] - ( 2 * diameter ), ijk[2], 0 ),  # bottom
+                       seedValue - image.GetScalarComponentAsFloat( ijk[0], ijk[1], ijk[2] + ( 2 * diameter ), 0 ),  # front
+                       seedValue - image.GetScalarComponentAsFloat( ijk[0], ijk[1], ijk[2] - ( 2 * diameter ), 0 )]  # back
+
+      differenceValue = max( outsideValues )
+
+      contrastMeasure = differenceValue / 10  # get 1/10 of it
+
+      return 2 * contrastMeasure
+
+    
+class VesselnessFilteringTest(ScriptedLoadableModuleTest):
+  """
+  This is the test case for your scripted module.
+  Uses ScriptedLoadableModuleTest base class, available at:
+  https://github.com/Slicer/Slicer/blob/master/Base/Python/slicer/ScriptedLoadableModule.py
+  """
+
+  def setUp(self):
+    """ Do whatever is needed to reset the state - typically a scene clear will be enough.
+    """
+    slicer.mrmlScene.Clear(0)
+    import SampleData
+    sampleDataLogic = SampleData.SampleDataLogic()
+    self.inputAngioVolume = sampleDataLogic.downloadCTACardio()
+    
+    self.vesselPositionRas = [176.9, -17.4, 52.7]
+
+    # make the output volume appear in all the slice views
+    selectionNode = slicer.app.applicationLogic().GetSelectionNode()
+    selectionNode.SetReferenceActiveVolumeID(self.inputAngioVolume.GetID())
+    slicer.app.applicationLogic().PropagateVolumeSelection(1)
+    
+  def runTest(self):
+    """Run as few or as many tests as needed here.
+    """
+    self.setUp()
+    self.test_BasicVesselSegmentation()
+
+  def test_BasicVesselSegmentation(self):
+    self.delayDisplay("Testing BasicVesselSegmentation")
+    
+    logic = VesselnessFilteringLogic()
+      
+    vesselPositionIJK = logic.getIJKFromRAS(self.inputAngioVolume, self.vesselPositionRas)
+    detectedDiameter = logic.getDiameter( self.inputAngioVolume.GetImageData(), vesselPositionIJK)
+    logging.info( "Diameter detected: " + str( detectedDiameter ) )
+
+    contrastMeasure = logic.calculateContrastMeasure( self.inputAngioVolume.GetImageData(), vesselPositionIJK, detectedDiameter )
+    logging.info( "Contrast measure: " + str( contrastMeasure ) )
+
+    previewVolumeNode = slicer.mrmlScene.CreateNodeByClass( "vtkMRMLScalarVolumeNode" )
+    previewVolumeNode.UnRegister(None)        
+    previewVolumeNode.SetName(slicer.mrmlScene.GetUniqueNameByString('VesselnessPreview'))
+    previewVolumeNode = slicer.mrmlScene.AddNode(previewVolumeNode)
+    previewVolumeNode.CreateDefaultDisplayNodes()
+    
+    logic.computeVesselnessVolume(self.inputAngioVolume, previewVolumeNode, previewRegionCenterRAS=self.vesselPositionRas, previewRegionSizeVoxel=detectedDiameter, minimumDiameterMm=0.2, maximumDiameterMm=detectedDiameter, alpha=0.03, beta=0.03, contrastMeasure=200)
+
+    #self.assertIsNotNone( markupsShItemID )
+    #self.assertEqual( shNode.GetItemOwnerPluginName(markupsShItemID), 'Markups' )
+    
+    slicer.util.setSliceViewerLayers(background=self.inputAngioVolume, foreground=previewVolumeNode)
+    
+    self.delayDisplay('Testing BasicVesselSegmentation completed successfully')
+    
 class Slicelet( object ):
   """A slicer slicelet is a module widget that comes up in stand alone mode
   implemented as a python class.

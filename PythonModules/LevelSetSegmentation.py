@@ -71,10 +71,6 @@ class LevelSetSegmentationWidget(ScriptedLoadableModuleWidget):
   def setup(self):
     ScriptedLoadableModuleWidget.setup(self)
 
-    # check if the SlicerVmtk module is installed properly
-    # self.__vmtkInstalled = SlicerVmtkCommonLib.Helper.CheckIfVmtkIsInstalled()
-    # Helper.Debug("VMTK found: " + self.__vmtkInstalled)
-
     #
     # the I/O panel
     #
@@ -478,9 +474,9 @@ class LevelSetSegmentationWidget(ScriptedLoadableModuleWidget):
         self.__outputModelNodeSelector.setCurrentNode( currentModelNode )
 
     # now we need to convert the fiducials to vtkIdLists
-    seeds = SlicerVmtkCommonLib.Helper.convertFiducialHierarchyToVtkIdList( currentSeedsNode, currentVolumeNode )
+    seeds = LevelSetSegmentationWidget.convertFiducialHierarchyToVtkIdList( currentSeedsNode, currentVolumeNode )
     if currentStoppersNode:
-      stoppers = SlicerVmtkCommonLib.Helper.convertFiducialHierarchyToVtkIdList(currentStoppersNode, currentVolumeNode)
+      stoppers = LevelSetSegmentationWidget.convertFiducialHierarchyToVtkIdList(currentStoppersNode, currentVolumeNode)
     else:
       stoppers = vtk.vtkIdList()
 
@@ -511,7 +507,7 @@ class LevelSetSegmentationWidget(ScriptedLoadableModuleWidget):
 
     if not initImageData.GetPointData().GetScalars():
         # something went wrong, the image is empty
-        SlicerVmtkCommonLib.Helper.Info( "Segmentation failed - the output was empty.." )
+        logging.error( "Segmentation failed - the output was empty.." )
         return False
 
     # check if it is a preview call
@@ -618,6 +614,40 @@ class LevelSetSegmentationWidget(ScriptedLoadableModuleWidget):
 
     logging.debug( "End of Level Set Segmentation.." )
     return True
+    
+    @staticmethod
+    def convertFiducialHierarchyToVtkIdList(hierarchyNode,volumeNode):
+        '''
+        '''
+        outputIds = vtk.vtkIdList()
+
+        if not hierarchyNode or not volumeNode:
+            return outputIds
+
+        if isinstance(hierarchyNode,slicer.vtkMRMLMarkupsFiducialNode) and isinstance(volumeNode,slicer.vtkMRMLScalarVolumeNode):
+
+            image = volumeNode.GetImageData()
+
+
+            # now we have the children which are fiducialNodes - let's loop!
+            for n in range(hierarchyNode.GetNumberOfFiducials()):
+
+                currentCoordinatesRAS = [0,0,0]
+
+                # grab the current coordinates
+                hierarchyNode.GetNthFiducialPosition(n,currentCoordinatesRAS)
+
+                # convert the RAS to IJK
+                currentCoordinatesIJK = Helper.ConvertRAStoIJK(volumeNode,currentCoordinatesRAS)
+
+                # strip the last element since we need a 3based tupel
+                currentCoordinatesIJKlist = (int(currentCoordinatesIJK[0]),int(currentCoordinatesIJK[1]),int(currentCoordinatesIJK[2]))
+                outputIds.InsertNextId(int(image.ComputePointId(currentCoordinatesIJKlist)))
+
+
+
+        # IdList was created, return it even if it might be empty
+        return outputIds
 
 class Slicelet( object ):
   """A slicer slicelet is a module widget that comes up in stand alone mode
