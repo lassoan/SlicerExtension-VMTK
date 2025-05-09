@@ -443,7 +443,7 @@ bool vtkSlicerStenosisMeasurement3DLogic::DefineOutputTable()
   /*
    * Define an input table structure to store the results in append mode only.
    */
-  if (!this->ParameterNode or (this->ParameterNode && !this->ParameterNode->GetOutputTableNode()))
+  if (!this->ParameterNode || (this->ParameterNode && !this->ParameterNode->GetOutputTableNode()))
   {
     return false;
   }
